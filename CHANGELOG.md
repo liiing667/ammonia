@@ -1,5 +1,14 @@
 # Unreleased
 
+* feat: allow URL schemes to be configured per tag and attribute
+  through `Builder::tag_attribute_url_schemes` and the related
+  `add_`/`rm_`/`clone_` helpers. A per-attribute entry overrides the
+  global `url_schemes` list, including the schemes accepted by `url()`
+  inside that element's inline `style` attribute. Relative URL handling
+  (`url_relative`) and `link_rel` behavior are unchanged, and scheme
+  checks stay case-insensitive and whitespace-resistant because the
+  value is parsed as a URL first.
+
 # 4.2.4
 
 * Security fix: Match CSS `url()` case-insensitively. This bug

@@ -362,6 +362,7 @@ pub struct Builder<'a> {
     set_tag_attribute_values: HashMap<&'a str, HashMap<&'a str, &'a str>>,
     generic_attributes: HashSet<&'a str>,
     url_schemes: HashSet<&'a str>,
+    tag_attribute_url_schemes: HashMap<&'a str, HashMap<&'a str, HashSet<&'a str>>>,
     url_relative: UrlRelative<'a>,
     attribute_filter: Option<Box<dyn AttributeFilter>>,
     link_rel: Option<&'a str>,
@@ -483,6 +484,7 @@ impl<'a> Default for Builder<'a> {
             set_tag_attribute_values,
             generic_attributes,
             url_schemes,
+            tag_attribute_url_schemes: hashmap![],
             url_relative: UrlRelative::PassThrough,
             attribute_filter: None,
             link_rel: Some("noopener noreferrer"),
@@ -1326,6 +1328,195 @@ impl<'a> Builder<'a> {
         self.url_schemes.clone()
     }
 
+    /// Sets the URL schemes permitted on a specific tag's URL-bearing attribute,
+    /// such as the `href` of an `<a>` tag or the `src` of an `<img>` tag.
+    ///
+    /// This overrides the global [`url_schemes`] list for the matching
+    /// tag/attribute pair: when an entry exists, the global list is not
+    /// consulted for that pair at all, so schemes have to be listed explicitly.
+    /// Pairs without an entry keep using the global list.
+    ///
+    /// The same rules apply to the URLs found in a `style` attribute: when a
+    /// `style` entry is present, every `url()` in that element's inline style
+    /// is checked against it, otherwise the global list is used.
+    ///
+    /// Scheme matching is case-insensitive, and leading or trailing
+    /// whitespace in the attribute value is ignored, because the value is
+    /// parsed as a URL before the scheme is checked.
+    ///
+    /// Relative URL handling stays governed by [`url_relative`], and the
+    /// `rel` attribute merging done by [`link_rel`] is unaffected.
+    ///
+    /// # Examples
+    ///
+    ///     use ammonia::Builder;
+    ///     use maplit::{hashmap, hashset};
+    ///
+    ///     # fn main() {
+    ///     let a = Builder::new()
+    ///         .tag_attribute_url_schemes(hashmap! {
+    ///             "a" => hashmap! { "href" => hashset!["mailto"] },
+    ///             "img" => hashmap! { "src" => hashset!["https"] },
+    ///         })
+    ///         .clean(
+    ///             r#"<a href="mailto:foo@example.com">mail</a>
+    ///                <a href="https://example.com">web</a>
+    ///                <img src="https://example.com/a.png">
+    ///                <img src="mailto:foo@example.com">"#,
+    ///         )
+    ///         .to_string();
+    ///     assert_eq!(
+    ///         a,
+    ///         r#"<a href="mailto:foo@example.com" rel="noopener noreferrer">mail</a>
+    ///                <a rel="noopener noreferrer">web</a>
+    ///                <img src="https://example.com/a.png">
+    ///                <img>"#
+    ///     );
+    ///     # }
+    ///
+    /// [`url_schemes`]: #method.url_schemes
+    /// [`url_relative`]: #method.url_relative
+    /// [`link_rel`]: #method.link_rel
+    pub fn tag_attribute_url_schemes(
+        &mut self,
+        value: HashMap<&'a str, HashMap<&'a str, HashSet<&'a str>>>,
+    ) -> &mut Self {
+        self.tag_attribute_url_schemes = value;
+        self
+    }
+
+    /// Adds URL schemes permitted on a specific tag's URL-bearing attribute,
+    /// without overwriting the schemes already configured for that pair.
+    ///
+    /// If no entry exists for the tag/attribute pair yet, one is created,
+    /// shadowing the global [`url_schemes`] list for that pair.
+    ///
+    /// # Examples
+    ///
+    ///     let a = ammonia::Builder::default()
+    ///         .add_tag_attribute_url_schemes("img", "src", &["data"])
+    ///         .clean(r#"<img src="data:image/png;base64,iVBORw0KGgo=">
+    ///                  <img src="https://example.com/a.png">"#)
+    ///         .to_string();
+    ///     assert_eq!(
+    ///         a,
+    ///         r#"<img src="data:image/png;base64,iVBORw0KGgo=">
+    ///                  <img>"#
+    ///     );
+    pub fn add_tag_attribute_url_schemes<
+        T: 'a + ?Sized + Borrow<str>,
+        U: 'a + ?Sized + Borrow<str>,
+        V: 'a + ?Sized + Borrow<str>,
+        I: IntoIter<Item = &'a V>,
+    >(
+        &mut self,
+        tag: &'a T,
+        attribute: &'a U,
+        it: I,
+    ) -> &mut Self {
+        self.tag_attribute_url_schemes
+            .entry(tag.borrow())
+            .or_default()
+            .entry(attribute.borrow())
+            .or_default()
+            .extend(it.into_iter().map(Borrow::borrow));
+        self
+    }
+
+    /// Removes URL schemes from a specific tag's URL-bearing attribute.
+    ///
+    /// Does nothing if the tag/attribute pair or one of the schemes is
+    /// already gone. Removing the last scheme leaves an empty entry in place,
+    /// which still overrides the global [`url_schemes`] list; use
+    /// [`rm_tag_attribute_url_schemes_key`] to remove the entry entirely.
+    ///
+    /// # Examples
+    ///
+    ///     let a = ammonia::Builder::default()
+    ///         .add_tag_attribute_url_schemes("a", "href", &["http", "ftp"])
+    ///         .rm_tag_attribute_url_schemes("a", "href", &["ftp"])
+    ///         .clean(r#"<a href="ftp://example.com/"></a>"#)
+    ///         .to_string();
+    ///     assert_eq!(a, r#"<a rel="noopener noreferrer"></a>"#);
+    ///
+    /// [`rm_tag_attribute_url_schemes_key`]: #method.rm_tag_attribute_url_schemes_key
+    pub fn rm_tag_attribute_url_schemes<
+        'b,
+        'c,
+        'd,
+        T: 'b + ?Sized + Borrow<str>,
+        U: 'c + ?Sized + Borrow<str>,
+        V: 'd + ?Sized + Borrow<str>,
+        I: IntoIter<Item = &'d V>,
+    >(
+        &mut self,
+        tag: &'b T,
+        attribute: &'c U,
+        it: I,
+    ) -> &mut Self {
+        if let Some(attributes) = self.tag_attribute_url_schemes.get_mut(tag.borrow()) {
+            if let Some(schemes) = attributes.get_mut(attribute.borrow()) {
+                for scheme in it {
+                    schemes.remove(scheme.borrow());
+                }
+            }
+        }
+        self
+    }
+
+    /// Removes the per-attribute URL scheme entry for a tag/attribute pair,
+    /// so the pair falls back to the global [`url_schemes`] list.
+    ///
+    /// Does nothing if no entry exists for the pair.
+    ///
+    /// # Examples
+    ///
+    ///     use maplit::hashset;
+    ///
+    ///     let mut b = ammonia::Builder::default();
+    ///     b.add_tag_attribute_url_schemes("img", "src", &["data"]);
+    ///     b.rm_tag_attribute_url_schemes_key("img", "src");
+    ///     let a = b
+    ///         .clean(r#"<img src="https://example.com/a.png">"#)
+    ///         .to_string();
+    ///     assert_eq!(a, r#"<img src="https://example.com/a.png">"#);
+    pub fn rm_tag_attribute_url_schemes_key<
+        'b,
+        'c,
+        T: 'b + ?Sized + Borrow<str>,
+        U: 'c + ?Sized + Borrow<str>,
+    >(
+        &mut self,
+        tag: &'b T,
+        attribute: &'c U,
+    ) -> &mut Self {
+        if let Some(attributes) = self.tag_attribute_url_schemes.get_mut(tag.borrow()) {
+            attributes.remove(attribute.borrow());
+        }
+        self
+    }
+
+    /// Returns a copy of the per-attribute URL scheme configuration.
+    ///
+    /// # Examples
+    ///     use maplit::{hashmap, hashset};
+    ///
+    ///     let tag_attribute_url_schemes = hashmap! {
+    ///         "a" => hashmap! { "href" => hashset!["mailto"] }
+    ///     };
+    ///
+    ///     let mut b = ammonia::Builder::default();
+    ///     b.tag_attribute_url_schemes(Clone::clone(&tag_attribute_url_schemes));
+    ///     assert_eq!(
+    ///         tag_attribute_url_schemes,
+    ///         b.clone_tag_attribute_url_schemes()
+    ///     );
+    pub fn clone_tag_attribute_url_schemes(
+        &self,
+    ) -> HashMap<&'a str, HashMap<&'a str, HashSet<&'a str>>> {
+        self.tag_attribute_url_schemes.clone()
+    }
+
     /// Configures the behavior for relative URLs: pass-through, resolve-with-base, or deny.
     ///
     /// # Examples
@@ -2027,6 +2218,17 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Resolves the set of URL schemes that apply to a tag/attribute pair.
+    ///
+    /// A per-attribute entry fully overrides the global `url_schemes` list;
+    /// when none exists, the global list is used.
+    fn url_schemes_for<'b>(&'b self, tag_name: &str, attr_name: &str) -> &'b HashSet<&'a str> {
+        self.tag_attribute_url_schemes
+            .get(tag_name)
+            .and_then(|attributes| attributes.get(attr_name))
+            .unwrap_or(&self.url_schemes)
+    }
+
     /// Remove unwanted attributes, and check if the node should be kept or not.
     ///
     /// The root node doesn't need cleaning because we create the root node ourselves,
@@ -2081,7 +2283,8 @@ impl<'a> Builder<'a> {
                         } else if is_url_attr(tag_name, attr_name) {
                             let url = Url::parse(attr_val);
                             if let Ok(url) = url {
-                                self.url_schemes.contains(url.scheme())
+                                self.url_schemes_for(tag_name, attr_name)
+                                    .contains(url.scheme())
                             } else if url == Err(url::ParseError::RelativeUrlWithoutBase) {
                                 !matches!(self.url_relative, UrlRelative::Deny)
                             } else {
@@ -2472,13 +2675,14 @@ impl<'a> Builder<'a> {
                 }
             }
             if let Some(allowed_values) = &self.style_properties {
+                let url_schemes = self.url_schemes_for(&name.local, "style");
                 for attr in &mut *attrs.borrow_mut() {
                     if &attr.name.local == "style" {
                         attr.value = style::filter_style_attribute(
                             &attr.value,
                             allowed_values,
                             &self.url_relative,
-                            &self.url_schemes,
+                            url_schemes,
                         )
                         .into();
                     }
@@ -2638,6 +2842,7 @@ impl<'a> Builder<'a> {
                     }
                     if &*animate_name == "style" {
                         if let Some(allowed_values) = &self.style_properties {
+                            let url_schemes = self.url_schemes_for(animate_tag_name, "style");
                             if let Some(animate_values) = attrs
                                 .iter_mut()
                                 .find(|attr| &*attr.name.local == "values")
@@ -2650,7 +2855,7 @@ impl<'a> Builder<'a> {
                                             &value,
                                             allowed_values,
                                             &self.url_relative,
-                                            &self.url_schemes,
+                                            url_schemes,
                                         )
                                     })
                                     .collect::<Vec<String>>()
@@ -2668,7 +2873,7 @@ impl<'a> Builder<'a> {
                                     &animate_value,
                                     allowed_values,
                                     &self.url_relative,
-                                    &self.url_schemes,
+                                    url_schemes,
                                 )
                                 .into();
                             }
@@ -4635,6 +4840,34 @@ mod test {
     }
 
     #[test]
+    fn ns_svg_animate_style_uses_tag_attribute_url_schemes() {
+        let fragment = r##"
+            <svg>
+                <a>
+                    <animate attributeName="style" values='background-image:url(https://example.com/a.png);background-image:url(mailto:foo@example.com)'></animate>
+                    <animate attributeName="style" from='background-image:url(https://example.com/b.png)' to='background-image:url(mailto:foo@example.com)'></animate>
+                </a>
+            </svg>
+        "##;
+        let filtered = r##"
+            <svg>
+                <a rel="noopener noreferrer">
+                    <animate attributeName="style" values="background-image:url(&quot;https://example.com/a.png&quot;);"></animate>
+                    <animate attributeName="style" from="background-image:url(&quot;https://example.com/b.png&quot;)" to=""></animate>
+                </a>
+            </svg>
+        "##;
+        let result = Builder::default()
+            .add_tags(&["svg", "a", "animate"])
+            .add_tag_attributes("animate", ["attributeName", "values", "from", "to"])
+            .add_tag_attributes("a", ["style"])
+            .filter_style_properties(["background-image"].into())
+            .add_tag_attribute_url_schemes("a", "style", &["https"])
+            .clean(fragment);
+        assert_eq!(result.to_string(), filtered,);
+    }
+
+    #[test]
     fn ns_svg_animate_url_attr_href() {
         let fragment = r##"
             <svg>
@@ -4939,6 +5172,269 @@ mod test {
         builder.url_relative(UrlRelative::Deny);
         builder.add_generic_attributes(&["style"]);
         assert_eq!(String::from(builder.clean(fragment)), expected);
+    }
+
+    #[test]
+    fn tag_attribute_url_schemes_separates_href_and_src() {
+        let fragment = r#"
+<a href="mailto:foo@example.com">mail</a>
+<a href="https://example.com/">web</a>
+<img src="https://example.com/a.png">
+<img src="mailto:foo@example.com">
+"#;
+        let expected = r#"
+<a href="mailto:foo@example.com" rel="noopener noreferrer">mail</a>
+<a rel="noopener noreferrer">web</a>
+<img src="https://example.com/a.png">
+<img>
+"#;
+        let result = Builder::new()
+            .add_tag_attribute_url_schemes("a", "href", &["mailto"])
+            .add_tag_attribute_url_schemes("img", "src", &["https"])
+            .clean(fragment)
+            .to_string();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn tag_attribute_url_schemes_falls_back_to_global_list() {
+        let fragment =
+            r#"<a href="https://example.com/">web</a><img src="https://example.com/a.png">"#;
+        let result = Builder::new()
+            .add_tag_attribute_url_schemes("a", "href", &["mailto"])
+            .clean(fragment)
+            .to_string();
+        assert_eq!(
+            result,
+            r#"<a rel="noopener noreferrer">web</a><img src="https://example.com/a.png">"#
+        );
+    }
+
+    #[test]
+    fn tag_attribute_url_schemes_rejects_case_and_whitespace_bypasses() {
+        let fragment = r#"
+<a href="MAILTO:foo@example.com">upper case scheme</a>
+<a href="  mailto:foo@example.com  ">leading and trailing whitespace</a>
+<a href="&#9;mailto:foo@example.com">tab before scheme</a>
+<a href="mailto:foo@example.com">lower case scheme</a>
+<img src="  HTTPS://example.com/a.png  ">whitespace around src
+<img src="https://example.com/a.png">plain src
+"#;
+        let expected = r#"
+<a href="MAILTO:foo@example.com" rel="noopener noreferrer">upper case scheme</a>
+<a href="  mailto:foo@example.com  " rel="noopener noreferrer">leading and trailing whitespace</a>
+<a href="	mailto:foo@example.com" rel="noopener noreferrer">tab before scheme</a>
+<a href="mailto:foo@example.com" rel="noopener noreferrer">lower case scheme</a>
+<img src="  HTTPS://example.com/a.png  ">whitespace around src
+<img src="https://example.com/a.png">plain src
+"#;
+        let result = Builder::new()
+            .add_tag_attribute_url_schemes("a", "href", &["mailto"])
+            .add_tag_attribute_url_schemes("img", "src", &["https"])
+            .clean(fragment)
+            .to_string();
+        assert_eq!(result, expected);
+
+        let fragment = r#"
+<a href="https://example.com/">wrong scheme in upper case</a>
+<img src="mailto:foo@example.com">wrong scheme for img
+<a href="&#10;https://example.com/">newline before disallowed scheme</a>
+"#;
+        let expected = r#"
+<a rel="noopener noreferrer">wrong scheme in upper case</a>
+<img>wrong scheme for img
+<a rel="noopener noreferrer">newline before disallowed scheme</a>
+"#;
+        let result = Builder::new()
+            .add_tag_attribute_url_schemes("a", "href", &["mailto"])
+            .add_tag_attribute_url_schemes("img", "src", &["https"])
+            .clean(fragment)
+            .to_string();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn tag_attribute_url_schemes_keeps_relative_url_behavior() {
+        let fragment = r#"<a href="/relative">rel</a><img src="relative.png">rel img"#;
+
+        let result = Builder::new()
+            .add_tag_attribute_url_schemes("a", "href", &["mailto"])
+            .add_tag_attribute_url_schemes("img", "src", &["https"])
+            .clean(fragment)
+            .to_string();
+        assert_eq!(
+            result,
+            r#"<a href="/relative" rel="noopener noreferrer">rel</a><img src="relative.png">rel img"#
+        );
+
+        let result = Builder::new()
+            .add_tag_attribute_url_schemes("a", "href", &["mailto"])
+            .add_tag_attribute_url_schemes("img", "src", &["https"])
+            .url_relative(UrlRelative::Deny)
+            .clean(fragment)
+            .to_string();
+        assert_eq!(
+            result,
+            r#"<a rel="noopener noreferrer">rel</a><img>rel img"#
+        );
+
+        let result = Builder::new()
+            .add_tag_attribute_url_schemes("a", "href", &["mailto"])
+            .url_relative(UrlRelative::RewriteWithBase(
+                Url::parse("https://example.com/base/").unwrap(),
+            ))
+            .clean(r#"<a href="relative">rel</a>"#)
+            .to_string();
+        assert_eq!(
+            result,
+            r#"<a href="https://example.com/base/relative" rel="noopener noreferrer">rel</a>"#
+        );
+    }
+
+    #[test]
+    fn tag_attribute_url_schemes_keeps_link_rel_merging() {
+        let fragment = r#"<a href="mailto:foo@example.com">mail</a>"#;
+        let result = Builder::new()
+            .add_tag_attribute_url_schemes("a", "href", &["mailto"])
+            .clean(fragment)
+            .to_string();
+        assert_eq!(
+            result,
+            r#"<a href="mailto:foo@example.com" rel="noopener noreferrer">mail</a>"#
+        );
+
+        // A user-supplied rel is stripped unless whitelisted, as without
+        // per-attribute URL scheme configuration.
+        let fragment = r#"<a href="mailto:foo@example.com" rel="tag">mail</a>"#;
+        let result = Builder::new()
+            .add_tag_attribute_url_schemes("a", "href", &["mailto"])
+            .clean(fragment)
+            .to_string();
+        assert_eq!(
+            result,
+            r#"<a href="mailto:foo@example.com" rel="noopener noreferrer">mail</a>"#
+        );
+
+        let result = Builder::new()
+            .add_tag_attribute_url_schemes("a", "href", &["mailto"])
+            .link_rel(None)
+            .tag_attributes(hashmap! { "a" => hashset!["href", "rel"] })
+            .clean(fragment)
+            .to_string();
+        assert_eq!(
+            result,
+            r#"<a href="mailto:foo@example.com" rel="tag">mail</a>"#
+        );
+    }
+
+    #[test]
+    fn tag_attribute_url_schemes_filters_inline_style_urls() {
+        let fragment = r#"
+<p style="background-image:url(https://example.com/a.png)">https allowed</p>
+<p style="background-image:url(mailto:foo@example.com)">mailto not allowed</p>
+<p style='background-image:url("HTTPS://example.com/b.png")'>upper case scheme</p>
+<p style="background-image: url(  https://example.com/c.png  )">whitespace</p>
+<p style="background-image:url(relative.png)">relative</p>
+"#;
+        let expected = r#"
+<p style="background-image:url(&quot;https://example.com/a.png&quot;)">https allowed</p>
+<p style="">mailto not allowed</p>
+<p style="background-image:url(&quot;https://example.com/b.png&quot;)">upper case scheme</p>
+<p style="background-image:url(&quot;https://example.com/c.png&quot;)">whitespace</p>
+<p style="background-image:url(&quot;relative.png&quot;)">relative</p>
+"#;
+        let result = Builder::new()
+            .add_tag_attribute_url_schemes("p", "style", &["https"])
+            .filter_style_properties(hashset!["background-image"])
+            .add_generic_attributes(&["style"])
+            .clean(fragment)
+            .to_string();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn tag_attribute_url_schemes_style_falls_back_to_global_list() {
+        let fragment = r#"<p style="background-image:url(mailto:foo@example.com)">mail</p>"#;
+        let expected =
+            r#"<p style="background-image:url(&quot;mailto:foo@example.com&quot;)">mail</p>"#;
+        let result = Builder::new()
+            .filter_style_properties(hashset!["background-image"])
+            .add_generic_attributes(&["style"])
+            .clean(fragment)
+            .to_string();
+        assert_eq!(result, expected);
+
+        let result = Builder::new()
+            .add_tag_attribute_url_schemes("p", "style", &["https"])
+            .filter_style_properties(hashset!["background-image"])
+            .add_generic_attributes(&["style"])
+            .clean(fragment)
+            .to_string();
+        assert_eq!(result, r#"<p style="">mail</p>"#);
+    }
+
+    #[test]
+    fn tag_attribute_url_schemes_style_denies_relative_urls() {
+        let fragment = r#"<p style="background-image:url(relative.png)">rel</p>"#;
+        let result = Builder::new()
+            .add_tag_attribute_url_schemes("p", "style", &["https"])
+            .filter_style_properties(hashset!["background-image"])
+            .add_generic_attributes(&["style"])
+            .url_relative(UrlRelative::Deny)
+            .clean(fragment)
+            .to_string();
+        assert_eq!(result, r#"<p style="">rel</p>"#);
+    }
+
+    #[test]
+    fn tag_attribute_url_schemes_builder_helpers() {
+        let mut builder = Builder::new();
+        builder
+            .tag_attribute_url_schemes(hashmap! {
+                "a" => hashmap! { "href" => hashset!["mailto", "https"] }
+            })
+            .add_tag_attribute_url_schemes("a", "href", &["ftp"])
+            .add_tag_attribute_url_schemes("img", "src", &["https"]);
+        assert_eq!(
+            builder
+                .clone_tag_attribute_url_schemes()
+                .get("a")
+                .unwrap()
+                .get("href")
+                .unwrap(),
+            &hashset!["mailto", "https", "ftp"]
+        );
+
+        builder.rm_tag_attribute_url_schemes("a", "href", &["ftp"]);
+        assert_eq!(
+            builder
+                .clone_tag_attribute_url_schemes()
+                .get("a")
+                .unwrap()
+                .get("href")
+                .unwrap(),
+            &hashset!["mailto", "https"]
+        );
+
+        // An empty entry still overrides the global url_schemes list.
+        builder.rm_tag_attribute_url_schemes("a", "href", &["mailto", "https"]);
+        let result = builder
+            .clean(r#"<a href="https://example.com/">x</a>"#)
+            .to_string();
+        assert_eq!(result, r#"<a rel="noopener noreferrer">x</a>"#);
+
+        // Removing the entry restores the global fallback.
+        builder.rm_tag_attribute_url_schemes_key("a", "href");
+        let result = builder
+            .clean(r#"<a href="https://example.com/">x</a>"#)
+            .to_string();
+        assert_eq!(
+            result,
+            r#"<a href="https://example.com/" rel="noopener noreferrer">x</a>"#
+        );
+
+        // Removing a missing pair is a no-op.
+        builder.rm_tag_attribute_url_schemes_key("nope", "nope");
     }
 
     #[test]
